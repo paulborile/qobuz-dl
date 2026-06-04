@@ -1,0 +1,3 @@
+[console_scripts]
+qdl = qobuz_dl:main
+qobuz-dl = qobuz_dl:main

@@ -149,14 +149,18 @@ def tag_flac(
         audio["ALBUMARTIST"] = d["album"]["artist"]["name"]
         audio["TRACKTOTAL"] = str(d["album"]["tracks_count"])
         audio["ALBUM"] = d["album"]["title"]
-        audio["DATE"] = d["album"]["release_date_original"]
+        date = d["album"].get("release_date_original")
+        if date:
+            audio["DATE"] = date
         audio["COPYRIGHT"] = _format_copyright(d.get("copyright") or "n/a")
     else:
         audio["GENRE"] = _format_genres(album["genres_list"])
         audio["ALBUMARTIST"] = album["artist"]["name"]
         audio["TRACKTOTAL"] = str(album["tracks_count"])
         audio["ALBUM"] = album["title"]
-        audio["DATE"] = album["release_date_original"]
+        date = album.get("release_date_original")
+        if date:
+            audio["DATE"] = date
         audio["COPYRIGHT"] = _format_copyright(album.get("copyright") or "n/a")
 
     if em_image:

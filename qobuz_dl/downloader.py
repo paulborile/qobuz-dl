@@ -267,7 +267,7 @@ class Download:
         return {
             "artist": sanitize_filename(meta["artist"]["name"]),
             "album": sanitize_filename(album_title),
-            "year": meta["release_date_original"].split("-")[0],
+            "year": (meta.get("release_date_original") or meta.get("release_date") or "").split("-")[0],
             "format": file_format,
             "bit_depth": bit_depth,
             "sampling_rate": sampling_rate,

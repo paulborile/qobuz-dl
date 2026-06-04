@@ -2,13 +2,20 @@ import logging
 import os
 import sys
 
+if os.name == "nt":
+    OS_CONFIG = os.environ.get("APPDATA")
+else:
+    OS_CONFIG = os.path.join(os.environ["HOME"], ".config")
+
+CONFIG_FILE = os.path.join(OS_CONFIG, "qobuz-dl", "config.ini")
+
 import requests
 from bs4 import BeautifulSoup as bso
 from pathvalidate import sanitize_filename
 
 from qobuz_dl.bundle import Bundle
 from qobuz_dl import downloader, qopy
-from qobuz_dl.color import CYAN, OFF, RED, YELLOW, DF, RESET
+from qobuz_dl.color import CYAN, GREEN, OFF, RED, YELLOW, DF, RESET
 from qobuz_dl.exceptions import NonStreamable
 from qobuz_dl.db import create_db, handle_download_id
 from qobuz_dl.utils import (
@@ -73,12 +80,38 @@ class QobuzDL:
         self.client = qopy.Client(email, pwd, app_id, secrets)
         logger.info(f"{YELLOW}Set max quality: {QUALITIES[int(self.quality)]}\n")
 
+    def initialize_client_with_token(self, user_id, user_auth_token, app_id, secrets):
+        self.client = qopy.Client(None, None, app_id, secrets, skip_auth=True)
+        self.client.auth_with_token(user_id, user_auth_token)
+        logger.info(f"{YELLOW}Set max quality: {QUALITIES[int(self.quality)]}\n")
+
+    def initialize_client_with_oauth(self, code, app_id, secrets, private_key):
+        self.client = qopy.Client(None, None, app_id, secrets, skip_auth=True)
+        usr_info = self.client.login_with_oauth_code(code, private_key)
+        self.oauth_user_id = usr_info.get("user", {}).get("id")
+        self.oauth_user_auth_token = usr_info.get("user_auth_token")
+        logger.info(f"{YELLOW}Set max quality: {QUALITIES[int(self.quality)]}\n")
+
+    def save_oauth_token_to_config(self, config_file):
+        if not hasattr(self, 'oauth_user_auth_token') or not self.oauth_user_auth_token:
+            return
+        import configparser
+        config = configparser.ConfigParser()
+        config.read(config_file)
+        config["DEFAULT"]["user_auth_token"] = self.oauth_user_auth_token
+        if hasattr(self, 'oauth_user_id') and self.oauth_user_id:
+            config["DEFAULT"]["user_id"] = str(self.oauth_user_id)
+        with open(config_file, "w") as f:
+            config.write(f)
+        logger.info(f"{GREEN}OAuth token saved to config.ini")
+
     def get_tokens(self):
         bundle = Bundle()
         self.app_id = bundle.get_app_id()
         self.secrets = [
             secret for secret in bundle.get_secrets().values() if secret
-        ]  # avoid empty fields
+        ]
+        self.private_key = bundle.get_private_key()
 
     def download_from_id(self, item_id, album=True, alt_path=None):
         if handle_download_id(self.downloads_db, item_id, add_id=False):
@@ -195,6 +228,84 @@ class QobuzDL:
                 f" urls from file: {txt_file}"
             )
             self.download_list_of_urls(urls)
+
+    def handle_oauth_login(self, code=None):
+        import socket
+        import threading
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        from urllib.parse import urlparse, parse_qs
+
+        if not code:
+            # Find available port
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                port = s.getsockname()[1]
+
+            oauth_url = (
+                f"https://www.qobuz.com/signin/oauth"
+                f"?ext_app_id={self.app_id}"
+                f"&redirect_url=http://localhost:{port}"
+            )
+
+            class OAuthHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    parsed = urlparse(self.path)
+                    params = parse_qs(parsed.query)
+                    auth_code = params.get("code", [params.get("code_autorisation", [""])[0]])[0]
+                    if auth_code:
+                        OAuthHandler.auth_code = auth_code
+                        self.send_response(200)
+                        self.send_header('Content-type', 'text/html')
+                        self.end_headers()
+                        self.wfile.write(b"<html><body style='font-family:system-ui;text-align:center;padding:60px'><h2>Login successful</h2><p>You can close this tab and return to your terminal.</p></body></html>")
+                    else:
+                        self.send_response(400)
+                        self.end_headers()
+                        self.wfile.write(b"<html><body><h2>Login failed</h2></body></html>")
+
+                def log_message(self, format, *args):
+                    pass
+
+            OAuthHandler.auth_code = None
+
+            logger.info(f"{YELLOW}Open this URL in your browser to authenticate with Qobuz:")
+            logger.info(f"{CYAN}{oauth_url}{RESET}")
+            logger.info(
+                f"{YELLOW}A local server on port {port} will capture the OAuth code automatically."
+            )
+
+            server = HTTPServer(('127.0.0.1', port), OAuthHandler)
+            thread = threading.Thread(target=server.handle_request)
+            thread.start()
+
+            input(f"{YELLOW}Press Enter after completing login in your browser...")
+
+            server.server_close()
+            thread.join()
+
+            if OAuthHandler.auth_code:
+                code = OAuthHandler.auth_code
+            else:
+                logger.error(f"{RED}No OAuth code received. Please try again.")
+                return
+        else:
+            if "code" in code or "code_autorisation" in code:
+                parsed = urlparse(code)
+                params = parse_qs(parsed.query)
+                code = params.get("code", [params.get("code_autorisation", [""])[0]])[0]
+
+        if not code:
+            logger.error(f"{RED}No OAuth code found in the provided URL")
+            return
+
+        if not hasattr(self, "client") or self.client is None:
+            logger.info(f"{YELLOW}Refreshing app_id and secrets...")
+            self.get_tokens()
+
+        self.initialize_client_with_oauth(code, self.app_id, self.secrets, self.private_key)
+        logger.info(f"{GREEN}OAuth login successful!")
+        self.save_oauth_token_to_config(CONFIG_FILE)
 
     def lucky_mode(self, query, download=True):
         if len(query) < 3:
